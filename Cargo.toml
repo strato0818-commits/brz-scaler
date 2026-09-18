@@ -1,0 +1,25 @@
+[package]
+name = "brz-scaler-gui"
+version = "1.2.0"
+authors = ["Kmschr <Kmschr@gmail.com>"]
+edition = "2021"
+description = "Standalone GUI for scaling Brickadia BRZ builds"
+
+[lib]
+name = "brz_scaler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brz-scaler-gui"
+path = "src/main.rs"
+
+[dependencies]
+brdb = { git = "https://github.com/brickadia-community/brdb" }
+serde_json = "1.0"
+eframe = "0.33"
+rfd = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = { version = "5.4.1", features = ["windows-win"] }
+
+[workspace]
