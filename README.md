@@ -27,8 +27,8 @@ On Windows, `build.bat` builds the release and `run.bat` builds and launches it.
 4. Click **Scale BRZ**.
 5. The output file is automatically copied to the clipboard.
 
-Values above `1` enlarge, values below `1` shrink, and decimal factors are
-supported.
+Scale factors must be whole numbers of `1` or greater. This avoids fractional
+rounding overlaps that can cause Brickadia to discard bricks.
 
 ## Distribution
 

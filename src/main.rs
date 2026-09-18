@@ -176,13 +176,13 @@ impl eframe::App for ScalerApp {
                 ui.horizontal(|ui| {
                     for (label, value) in ["X", "Y", "Z"].into_iter().zip(&mut self.axis_factors) {
                         ui.label(label);
-                        scale_changed |= ui.add(DragValue::new(value).range(0.01..=1000.0).speed(0.05).max_decimals(4)).changed();
+                        scale_changed |= ui.add(DragValue::new(value).range(1.0..=1000.0).speed(1.0).fixed_decimals(0)).changed();
                     }
                 });
             } else {
                 ui.horizontal(|ui| {
                     ui.label("Scale factor");
-                    scale_changed |= ui.add(DragValue::new(&mut self.factor).range(0.01..=1000.0).speed(0.05).max_decimals(4)).changed();
+                    scale_changed |= ui.add(DragValue::new(&mut self.factor).range(1.0..=1000.0).speed(1.0).fixed_decimals(0)).changed();
                 });
             }
             if scale_changed && !self.input.is_empty() {
@@ -192,7 +192,7 @@ impl eframe::App for ScalerApp {
                 self.output = default_output_path(Path::new(&self.input), self.factors()).to_string_lossy().into_owned();
                 self.overwrite = false;
             }
-            ui.label("Below 1 scales down; above 1 scales up. XYZ factors follow build axes.");
+            ui.label("Scale factors are whole numbers from 1 to 1000. XYZ factors follow build axes.");
             ui.add_space(14.0);
 
             ui.add_enabled_ui(!self.running, |ui| {

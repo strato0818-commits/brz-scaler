@@ -90,12 +90,7 @@ pub fn scale_brz_with_options(
     options: ScaleOptions,
 ) -> Result<ScaleStats, String> {
     let factors = options.factors;
-    if factors
-        .iter()
-        .any(|factor| !factor.is_finite() || *factor <= 0.0)
-    {
-        return Err("all scale factors must be positive numbers".into());
-    }
+    validate_factors(factors)?;
     if same_path(input, output) {
         return Err("input and output paths must be different".into());
     }
@@ -356,6 +351,17 @@ fn rebuild_prefab_metadata(prefab: &mut PrefabJson, bounds: Option<(Position, Po
     prefab.pivots.top_studs_pivot = pivot;
     prefab.pivots.bounds_pivot = pivot;
     prefab.added_global_grid_offset = Default::default();
+}
+
+fn validate_factors(factors: [f64; 3]) -> Result<(), String> {
+    if factors
+        .iter()
+        .any(|factor| !factor.is_finite() || *factor < 1.0 || factor.fract() != 0.0)
+    {
+        Err("all scale factors must be whole numbers of 1 or greater".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn attach_components(
@@ -838,17 +844,9 @@ mod tests {
     }
 
     #[test]
-    fn scales_down_and_rounds_sizes_outward() {
-        assert_eq!(
-            scale_size_oriented(
-                BrickSize::new(5, 10, 1),
-                Direction::ZPositive,
-                Rotation::Deg0,
-                [0.5; 3]
-            )
-            .unwrap(),
-            BrickSize::new(3, 5, 1)
-        );
+    fn rejects_fractional_scale_factors() {
+        assert!(validate_factors([1.5, 2.0, 3.0]).is_err());
+        assert!(validate_factors([1.0, 2.0, 3.0]).is_ok());
     }
 
     #[test]
