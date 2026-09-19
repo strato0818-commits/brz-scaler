@@ -69,6 +69,8 @@ struct JointEdge {
     parent: u32,
     child: u32,
     correction: [f64; 3],
+    original_offset: [f64; 3],
+    final_offset: [f64; 3],
 }
 
 /// Scale every procedural brick in a BRZ archive and omit basic bricks, except
@@ -284,15 +286,14 @@ pub fn scale_brz_with_options(
                     .map_err(|error| format!("failed to repack grid {grid_id}: {error}"))?;
                 if let Some(joint) = &retained.joint {
                     let automatic = automatic_joint_socket_offset(joint.rotation, factors);
+                    let final_offset =
+                        offset_vector(scale_vector(joint.offset, factors), automatic)?;
                     let component_chunk = scaled_grid.components.entry(new_chunk).or_default();
                     component_chunk.joint_brick_indices.push(new_index as u32);
                     component_chunk.joint_entity_references.push(joint.entity);
                     component_chunk
                         .joint_initial_relative_offsets
-                        .push(offset_vector(
-                            scale_vector(joint.offset, factors),
-                            automatic,
-                        )?);
+                        .push(final_offset);
                     component_chunk
                         .joint_initial_relative_rotations
                         .push(joint.rotation);
@@ -300,6 +301,16 @@ pub fn scale_brz_with_options(
                         parent: grid_id as u32,
                         child: joint.entity,
                         correction: automatic,
+                        original_offset: [
+                            f64::from(joint.offset.x),
+                            f64::from(joint.offset.y),
+                            f64::from(joint.offset.z),
+                        ],
+                        final_offset: [
+                            f64::from(final_offset.x),
+                            f64::from(final_offset.y),
+                            f64::from(final_offset.z),
+                        ],
                     });
                 }
                 stats.output_bricks += 1;
@@ -328,7 +339,7 @@ pub fn scale_brz_with_options(
     }
     use brdb::pending::BrPendingFs::File;
     if let Some(prefab) = &mut prefab {
-        rebuild_prefab_metadata(prefab, main_intended_bounds);
+        rebuild_prefab_metadata(prefab, main_intended_bounds, factors);
         let bytes = serde_json::to_vec(prefab)
             .map_err(|error| format!("failed to encode prefab metadata: {error}"))?;
         *pending
@@ -342,15 +353,35 @@ pub fn scale_brz_with_options(
     Ok(stats)
 }
 
-fn rebuild_prefab_metadata(prefab: &mut PrefabJson, bounds: Option<(Position, Position)>) {
-    let pivot = bounds
-        .map(|(min, max)| PrefabPivot::from_bounds(min, max))
-        .unwrap_or_default();
-    prefab.pivots.bottom_studs_pivot = pivot;
-    prefab.pivots.studs_expanded_pivot = pivot;
-    prefab.pivots.top_studs_pivot = pivot;
-    prefab.pivots.bounds_pivot = pivot;
+fn rebuild_prefab_metadata(
+    prefab: &mut PrefabJson,
+    bounds: Option<(Position, Position)>,
+    factors: [f64; 3],
+) {
+    if prefab.is_physics_grid {
+        scale_prefab_pivot(&mut prefab.pivots.bottom_studs_pivot, factors);
+        scale_prefab_pivot(&mut prefab.pivots.studs_expanded_pivot, factors);
+        scale_prefab_pivot(&mut prefab.pivots.top_studs_pivot, factors);
+        scale_prefab_pivot(&mut prefab.pivots.bounds_pivot, factors);
+    } else {
+        let pivot = bounds
+            .map(|(min, max)| PrefabPivot::from_bounds(min, max))
+            .unwrap_or_default();
+        prefab.pivots.bottom_studs_pivot = pivot;
+        prefab.pivots.studs_expanded_pivot = pivot;
+        prefab.pivots.top_studs_pivot = pivot;
+        prefab.pivots.bounds_pivot = pivot;
+    }
     prefab.added_global_grid_offset = Default::default();
+}
+
+fn scale_prefab_pivot(pivot: &mut PrefabPivot, factors: [f64; 3]) {
+    pivot.center.x *= factors[0];
+    pivot.center.y *= factors[1];
+    pivot.center.z *= factors[2];
+    pivot.half_extent.x *= factors[0];
+    pivot.half_extent.y *= factors[1];
+    pivot.half_extent.z *= factors[2];
 }
 
 fn validate_factors(factors: [f64; 3]) -> Result<(), String> {
@@ -706,10 +737,38 @@ fn apply_joint_hierarchy_offsets(
     edges: &[JointEdge],
 ) -> Result<(), String> {
     let children: HashSet<_> = edges.iter().map(|edge| edge.child).collect();
-    let mut world_offsets = HashMap::from([(1_u32, [0.0; 3])]);
+    let mut positions: HashMap<u32, [f64; 3]> = chunks
+        .iter()
+        .flat_map(|chunk| &chunk.locations)
+        .map(|location| {
+            (
+                location.entity,
+                [
+                    f64::from(location.new.x),
+                    f64::from(location.new.y),
+                    f64::from(location.new.z),
+                ],
+            )
+        })
+        .collect();
+    let original_positions: HashMap<u32, [f64; 3]> = chunks
+        .iter()
+        .flat_map(|chunk| &chunk.locations)
+        .map(|location| {
+            (
+                location.entity,
+                [
+                    f64::from(location.old.x),
+                    f64::from(location.old.y),
+                    f64::from(location.old.z),
+                ],
+            )
+        })
+        .collect();
+    let mut resolved = HashSet::from([1_u32]);
     for &entity in rotations.keys() {
         if !children.contains(&entity) {
-            world_offsets.insert(entity, [0.0; 3]);
+            resolved.insert(entity);
         }
     }
 
@@ -718,18 +777,48 @@ fn apply_joint_hierarchy_offsets(
         let before = unresolved.len();
         unresolved.retain(|&index| {
             let edge = &edges[index];
-            let Some(parent_offset) = world_offsets.get(&edge.parent).copied() else {
+            if !resolved.contains(&edge.parent) {
                 return true;
-            };
-            let local = if edge.parent == 1 {
-                edge.correction
+            }
+            let child_position = if edge.parent == 1 {
+                let Some(current) = positions.get(&edge.child).copied() else {
+                    return true;
+                };
+                add_offsets(current, edge.correction)
             } else {
                 let Some(rotation) = rotations.get(&edge.parent).copied() else {
                     return true;
                 };
-                rotate_vector(rotation, edge.correction)
+                let Some(parent_position) = positions.get(&edge.parent).copied() else {
+                    return true;
+                };
+                let Some(old_parent) = original_positions.get(&edge.parent).copied() else {
+                    return true;
+                };
+                let Some(old_child) = original_positions.get(&edge.child).copied() else {
+                    return true;
+                };
+                let old_world_delta = [
+                    old_child[0] - old_parent[0],
+                    old_child[1] - old_parent[1],
+                    old_child[2] - old_parent[2],
+                ];
+                let inverse_rotation = Quat4f {
+                    x: -rotation.x,
+                    y: -rotation.y,
+                    z: -rotation.z,
+                    w: rotation.w,
+                };
+                let old_local_delta = rotate_vector(inverse_rotation, old_world_delta);
+                let new_local_delta = [
+                    old_local_delta[0] + edge.final_offset[0] - edge.original_offset[0],
+                    old_local_delta[1] + edge.final_offset[1] - edge.original_offset[1],
+                    old_local_delta[2] + edge.final_offset[2] - edge.original_offset[2],
+                ];
+                add_offsets(parent_position, rotate_vector(rotation, new_local_delta))
             };
-            world_offsets.insert(edge.child, add_offsets(parent_offset, local));
+            positions.insert(edge.child, child_position);
+            resolved.insert(edge.child);
             false
         });
         if unresolved.len() == before {
@@ -740,10 +829,10 @@ fn apply_joint_hierarchy_offsets(
     }
 
     for location in chunks.iter_mut().flat_map(|chunk| &mut chunk.locations) {
-        if let Some(offset) = world_offsets.get(&location.entity) {
-            location.new.x += offset[0] as f32;
-            location.new.y += offset[1] as f32;
-            location.new.z += offset[2] as f32;
+        if let Some(position) = positions.get(&location.entity) {
+            location.new.x = position[0] as f32;
+            location.new.y = position[1] as f32;
+            location.new.z = position[2] as f32;
         }
     }
     Ok(())
@@ -859,10 +948,12 @@ mod tests {
         rebuild_prefab_metadata(
             &mut prefab,
             Some((Position::new(-40, -20, 0), Position::new(40, 20, 32))),
+            [4.0; 3],
         );
 
         assert_eq!(prefab.pivots.bounds_pivot.center.x, 0.0);
         assert_eq!(prefab.pivots.bounds_pivot.center.y, 0.0);
+        assert_eq!(prefab.pivots.bottom_studs_pivot.center.z, 16.0);
         assert_eq!(prefab.pivots.bounds_pivot.center.z, 16.0);
         assert_eq!(prefab.pivots.bounds_pivot.half_extent.x, 40.0);
         assert_eq!(prefab.pivots.bounds_pivot.half_extent.y, 20.0);
@@ -870,6 +961,37 @@ mod tests {
         assert_eq!(prefab.added_global_grid_offset.x, 0);
         assert_eq!(prefab.added_global_grid_offset.y, 0);
         assert_eq!(prefab.added_global_grid_offset.z, 0);
+    }
+
+    #[test]
+    fn scales_full_assembly_pivots_for_physics_prefabs() {
+        let mut prefab = PrefabJson {
+            is_physics_grid: true,
+            ..Default::default()
+        };
+        for pivot in [
+            &mut prefab.pivots.bottom_studs_pivot,
+            &mut prefab.pivots.studs_expanded_pivot,
+            &mut prefab.pivots.top_studs_pivot,
+            &mut prefab.pivots.bounds_pivot,
+        ] {
+            pivot.center.x = 3.0;
+            pivot.half_extent.x = 67.0;
+            pivot.half_extent.y = 48.0;
+            pivot.half_extent.z = 51.0;
+        }
+
+        rebuild_prefab_metadata(
+            &mut prefab,
+            Some((Position::new(-10, -10, 0), Position::new(10, 10, 10))),
+            [2.0, 3.0, 4.0],
+        );
+
+        assert_eq!(prefab.pivots.bounds_pivot.center.x, 6.0);
+        assert_eq!(prefab.pivots.bounds_pivot.center.z, 0.0);
+        assert_eq!(prefab.pivots.bounds_pivot.half_extent.x, 134.0);
+        assert_eq!(prefab.pivots.bounds_pivot.half_extent.y, 144.0);
+        assert_eq!(prefab.pivots.bounds_pivot.half_extent.z, 204.0);
     }
 
     #[test]
@@ -944,5 +1066,36 @@ mod tests {
             automatic_joint_socket_offset(rotation, [1.0; 3]),
             [0.0, 0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn joint_residual_preserves_original_child_position_at_one_x() {
+        let parent = [-39.772476, -16.832067, 38.002686];
+        let rotation = Quat4f {
+            x: -0.14195509,
+            y: -0.14195509,
+            z: -0.6927112,
+            w: -0.6927111,
+        };
+        let expected = [-45.56838, -16.472696, 24.173828];
+        let world_delta = [
+            expected[0] - parent[0],
+            expected[1] - parent[1],
+            expected[2] - parent[2],
+        ];
+        let inverse = Quat4f {
+            x: -rotation.x,
+            y: -rotation.y,
+            z: -rotation.z,
+            w: rotation.w,
+        };
+        let local_delta = rotate_vector(inverse, world_delta);
+        let resolved = add_offsets(parent, rotate_vector(rotation, local_delta));
+        for axis in 0..3 {
+            assert!(
+                (resolved[axis] - expected[axis]).abs() < 0.001,
+                "resolved={resolved:?} expected={expected:?}"
+            );
+        }
     }
 }
