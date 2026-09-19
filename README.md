@@ -22,10 +22,13 @@ On Windows, `build.bat` builds the release and `run.bat` builds and launches it.
 ## Use
 
 1. Copy a `.brz` file in File Explorer.
-2. Open the scaler and click **Paste BRZ**.
-3. Choose **Overall** or **Separate X/Y/Z** scaling.
-4. Click **Scale BRZ**.
-5. The output file is automatically copied to the clipboard.
+2. Choose **Overall** or **Separate X/Y/Z** scaling.
+3. Click **Scale clipboard BRZ**.
+4. Paste the scaled BRZ from the clipboard wherever you want it.
+
+The GUI does not ask for input or output filenames. It creates an internal
+temporary BRZ because Windows file clipboard entries must reference a physical
+file, then automatically puts that temporary result on the clipboard.
 
 Scale factors must be whole numbers of `1` or greater. This avoids fractional
 rounding overlaps that can cause Brickadia to discard bricks.

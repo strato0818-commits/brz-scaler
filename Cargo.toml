@@ -17,7 +17,6 @@ path = "src/main.rs"
 brdb = { git = "https://github.com/brickadia-community/brdb" }
 serde_json = "1.0"
 eframe = "0.33"
-rfd = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { version = "5.4.1", features = ["windows-win"] }

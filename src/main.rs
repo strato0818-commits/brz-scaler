@@ -3,7 +3,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use eframe::egui::{self, DragValue, RichText};
-use rfd::FileDialog;
 
 struct ScaleResult {
     output: PathBuf,
@@ -16,7 +15,6 @@ struct ScalerApp {
     factor: f64,
     axis_factors: [f64; 3],
     use_xyz: bool,
-    overwrite: bool,
     running: bool,
     status: String,
     last_output: Option<PathBuf>,
@@ -31,9 +29,9 @@ impl Default for ScalerApp {
             factor: 2.0,
             axis_factors: [2.0; 3],
             use_xyz: false,
-            overwrite: false,
             running: false,
-            status: "Copy a BRZ in Explorer, then click Paste BRZ.".into(),
+            status: "Copy a BRZ in Explorer, choose a scale, then click Scale clipboard BRZ."
+                .into(),
             last_output: None,
             receiver: None,
         }
@@ -51,11 +49,27 @@ impl ScalerApp {
 
     fn set_input(&mut self, path: PathBuf) {
         self.input = path.to_string_lossy().into_owned();
-        self.output = default_output_path(&path, self.factors())
-            .to_string_lossy()
-            .into_owned();
+        self.output = temporary_output_path(&path).to_string_lossy().into_owned();
         self.last_output = None;
-        self.overwrite = false;
+    }
+
+    fn start_from_clipboard(&mut self) {
+        match files_from_clipboard().and_then(|paths| {
+            paths
+                .into_iter()
+                .find(|path| {
+                    path.extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("brz"))
+                })
+                .ok_or_else(|| "Clipboard has no copied BRZ file".into())
+        }) {
+            Ok(path) => {
+                self.set_input(path);
+                self.start();
+            }
+            Err(error) => self.status = error,
+        }
     }
 
     fn start(&mut self) {
@@ -73,10 +87,6 @@ impl ScalerApp {
             != Some("brz")
         {
             self.status = "Input must be a .brz file.".into();
-            return;
-        }
-        if output.exists() && !self.overwrite {
-            self.status = "Output exists; enable Allow overwrite or choose another path.".into();
             return;
         }
         let factors = self.factors();
@@ -138,39 +148,10 @@ impl eframe::App for ScalerApp {
             ui.label("Resize procedural bricks, omit non-scalable bricks, and normalize paste placement.");
             ui.add_space(12.0);
 
-            ui.horizontal(|ui| {
-                if ui.button("Paste BRZ").clicked() {
-                    match files_from_clipboard().and_then(|paths| {
-                        paths.into_iter().find(|path| path.extension().and_then(|v| v.to_str()).is_some_and(|v| v.eq_ignore_ascii_case("brz"))).ok_or_else(|| "Clipboard has no BRZ file".into())
-                    }) {
-                        Ok(path) => self.set_input(path),
-                        Err(error) => self.status = error,
-                    }
-                }
-                if ui.button("Browse input...").clicked() {
-                    if let Some(path) = FileDialog::new().add_filter("Brickadia BRZ", &["brz"]).pick_file() { self.set_input(path); }
-                }
-            });
-            ui.label("Input");
-            ui.text_edit_singleline(&mut self.input);
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Output");
-                if ui.button("Browse...").clicked() {
-                    let mut dialog = FileDialog::new().add_filter("Brickadia BRZ", &["brz"]);
-                    if let Some(parent) = Path::new(&self.output).parent() { dialog = dialog.set_directory(parent); }
-                    if let Some(path) = dialog.save_file() { self.output = path.to_string_lossy().into_owned(); }
-                }
-            });
-            ui.text_edit_singleline(&mut self.output);
-            ui.add_space(8.0);
-
             let mut scale_changed = false;
             ui.horizontal(|ui| {
                 scale_changed |= ui.radio_value(&mut self.use_xyz, false, "Overall").changed();
                 scale_changed |= ui.radio_value(&mut self.use_xyz, true, "Separate X/Y/Z").changed();
-                ui.checkbox(&mut self.overwrite, "Allow overwrite");
             });
             if self.use_xyz {
                 ui.horizontal(|ui| {
@@ -185,18 +166,18 @@ impl eframe::App for ScalerApp {
                     scale_changed |= ui.add(DragValue::new(&mut self.factor).range(1.0..=1000.0).speed(1.0).fixed_decimals(0)).changed();
                 });
             }
-            if scale_changed && !self.input.is_empty() {
+            if scale_changed {
                 if !self.use_xyz {
                     self.axis_factors = [self.factor; 3];
                 }
-                self.output = default_output_path(Path::new(&self.input), self.factors()).to_string_lossy().into_owned();
-                self.overwrite = false;
             }
             ui.label("Scale factors are whole numbers from 1 to 1000. XYZ factors follow build axes.");
             ui.add_space(14.0);
 
             ui.add_enabled_ui(!self.running, |ui| {
-                if ui.button(RichText::new("Scale BRZ").strong()).clicked() { self.start(); }
+                if ui.button(RichText::new("Scale clipboard BRZ").strong()).clicked() {
+                    self.start_from_clipboard();
+                }
             });
             if let Some(path) = self.last_output.clone() {
                 if ui.button("Copy result to clipboard").clicked() {
@@ -212,17 +193,16 @@ impl eframe::App for ScalerApp {
     }
 }
 
-fn default_output_path(input: &Path, factors: [f64; 3]) -> PathBuf {
+fn temporary_output_path(input: &Path) -> PathBuf {
     let stem = input
         .file_stem()
         .map(|v| v.to_string_lossy())
         .unwrap_or_default();
-    let suffix = if factors[0] == factors[1] && factors[1] == factors[2] {
-        factors[0].to_string()
-    } else {
-        format!("x{}_y{}_z{}", factors[0], factors[1], factors[2])
-    };
-    input.with_file_name(format!("{stem}_scaled_{suffix}.brz"))
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{stem}_scaled_{nonce}.brz"))
 }
 
 #[cfg(windows)]
@@ -263,7 +243,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Brickadia BRZ Scaler",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([620.0, 470.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([620.0, 340.0]),
             ..Default::default()
         },
         Box::new(|_| Ok(Box::<ScalerApp>::default())),
